@@ -1,0 +1,592 @@
+搭建mysql的主从复制和读写分离
+ 
+
++--------+  						(write)		+--------+ 				  
+| client |				 +---------------------+| master |	
++--------+|		  		 |						+--------+|
+	      |		   		 |							|
+          |		         |							|
+          |        	+--------+  	(read)			|
+(read)    +--------+| amoeba |+---------------------|-----------+	
+(write)	  |  		+--------+|						|			|
+          |		  			  |						|			|
+	      |		   		(read)|						|			|	
++--------+|    				  |	+--------+			|			+--------+
+| client |					  +-| slave1 |+---------+----------+| slave2 |
++--------+          	        +--------+    	(replication)	+--------+
+
+
+
+master  mysql:172.17.0.4
+slave1  mysql:172.17.0.5
+slave2 	mysql:172.17.0.6
+mysql-proxy(amoeba):172.17.0.8
+Test host:172.17.0.7
+
+主从复制：
+
+master mysql
+：
+安装mysqlserver和mysql
+yum install mysql-server mysql -y
+
+修改配置文件
+vim /etc/my.cnf.d/server.cnf
+[mysqld]
+server-id = 1
+log-bin = master-bin
+
+启动mysql
+/etc/init.d/mysql start
+
+修改root密码
+mysqladmin -uroot -p password mysql
+
+登陆mysql测试并查看master状态
+mysql -uroot -pmysql
+Welcome to the MariaDB monitor.  Commands end with ; or \g.
+Your MariaDB connection id is 22449
+Server version: 5.5.47-MariaDB-log MariaDB Server
+
+Copyright (c) 2000, 2015, Oracle, MariaDB Corporation Ab and others.
+
+Type 'help;' or '\h' for help. Type '\c' to clear the current input statement.
+
+MariaDB [(none)]> show master status;
++------------------+----------+--------------+------------------+
+| File             | Position | Binlog_Do_DB | Binlog_Ignore_DB |
++------------------+----------+--------------+------------------+
+| mysql-bin.000001 |     3648 |              |                  |
++------------------+----------+--------------+------------------+
+1 row in set (0.03 sec)
+
+创建主从同步账号
+MariaDB [(none)]> grant replication slave on *.* to 'mysqlmaster'@'172.17.0.%' identified by '123456';
+
+slave1 mysql
+：
+安装mysqlserver和mysql
+yum install mysql-server mysql -y
+
+修改配置文件
+vim /etc/my.cnf.d/server.cnf
+[mysqld]
+server-id = 2    #id必须唯一
+log-bin = slave-bin
+
+启动mysql
+/etc/init.d/mysql start
+
+修改root密码
+mysqladmin -uroot -p password mysql
+
+创建同步文件
+MariaDB [(none)]> change master to master_host='172.17.0.4',master_user='mysqlmaster',master_password='123456',master_log_file='mysql-bin.000001',master_log_pos=3648;
+MariaDB [(none)]> start slave;
+
+查看是否成功，确保下面两项为Yes
+
+MariaDB [(none)]> show slave status\G;
+Slave_IO_Running: Yes
+Slave_SQL_Running: Yes
+
+master mysql
+：
+
+在master mysql上创建数据查看slave1 mysql是否同步
+MariaDB [(none)]> create database new1;
+Query OK, 1 row affected (0.00 sec)
+
+MariaDB [(none)]> create database new2;
+Query OK, 1 row affected (0.00 sec)
+
+MariaDB [(none)]> show databases;
++--------------------+
+| Database           |
++--------------------+
+| information_schema |
+| mysql              |
+| new1               |
+| new2               |
+| performance_schema |
+| test               |
++--------------------+
+6 rows in set (0.00 sec)
+
+
+
+slave1 mysql
+:
+MariaDB [(none)]> show databases;
++--------------------+
+| Database           |
++--------------------+
+| information_schema |
+| mysql              |
+| new1               |
+| new2               |
+| performance_schema |
+| test               |
++--------------------+
+6 rows in set (0.00 sec)
+
+
+
+我们生产环境中会碰到这种情况：备份主机数据，或者添加一台主机。进行双主机的结构。
+另外就是在线上中途添加更多的从机。
+
+而我们知道，从机上设置 slave 时要指定 master_log_file 和 master_log_pos, 即指定binlog文件和偏移值。
+这也就是说，从机是可以从任意位置的 binlog 文件中进行数据的同步。比如：我们将 binlog 文件备份到其它某处放置，某天，数据库出问题了，需要对某些数据进行数据恢复，这时候从该文件中进行恢复。
+添加一个新的从机，可以有两种方式：从 master 机器复制; 另一种是直接从 slave 复制.
+
+mysql-主从结构添加新的slave
+
+两种解决办法
+1.copy master
+
+master mysql
+：
+锁定数据库
+MariaDB [(none)]>  flush tables with read lock;
+Query OK, 0 rows affected (0.04 sec)
+
+查看主机状态，几下file position参数
+MariaDB [(none)]> show master status;
++------------------+----------+--------------+------------------+
+| File             | Position | Binlog_Do_DB | Binlog_Ignore_DB |
++------------------+----------+--------------+------------------+
+| mysql-bin.000001 |     3974 |              |                  |
++------------------+----------+--------------+------------------+
+
+备份所有数据库
+mysqldump --all-databases -uroot -pmysql  > backup.sql
+
+拷贝到准备新加的slave主机
+scp backup.sql root@172.17.0.6:/root
+
+
+slave2 mysql
+:
+安装mysqlserver和mysql
+yum install mysql-server mysql -y
+
+修改配置文件
+vim /etc/my.cnf.d/server.cnf
+[mysqld]
+server-id = 3    #id必须唯一
+log-bin = slave2-bin
+
+启动mysql
+/etc/init.d/mysql start
+
+修改root密码
+mysqladmin -uroot -p password mysql
+
+导入主服务器scp过来的数据库
+mysql -uroot -pmysql < backup.sql
+
+创建同步文件
+MariaDB [(none)]> change master to master_host='172.17.0.4',master_user='mysqlmaster',master_password='123456',master_log_file='mysql-bin.000001',master_log_pos=3974;
+MariaDB [(none)]> start slave;
+
+查看是否成功，确保下面两项为Yes
+
+MariaDB [(none)]> show slave status\G;
+Slave_IO_Running: Yes
+Slave_SQL_Running: Yes
+
+master mysql
+：
+创建数据验证是否添加成功
+MariaDB [(none)]> create database new3;
+Query OK, 1 row affected (0.00 sec)
+
+MariaDB [(none)]> show databases;
++--------------------+
+| Database           |
++--------------------+
+| information_schema |
+| mysql              |
+| new1               |
+| new2				 |	
+| new3               | 
+| performance_schema |
+| test               |
++--------------------+
+6 rows in set (0.00 sec)
+ 
+slave2 mysql
+:
+MariaDB [(none)]> create database new3;
+Query OK, 1 row affected (0.00 sec)
+
+MariaDB [(none)]> show databases;
++--------------------+
+| Database           |
++--------------------+
+| information_schema |
+| mysql              |
+| new1               |
+| new2				 |	
+| new3               | 
+| performance_schema |
+| test               |
++--------------------+
+6 rows in set (0.00 sec)
+
+2 copy slave
+
+复制从库要步骤：
+====================
+可以看到，从主库复制会有段时间锁表，这段时间会影响主库的使用。如果我们能直接从从库进行复制，就不会对主库产生影响了。但是，从从库复制要保证的是复制过程中从库上的数据不会发生变化，所以要先停掉从库。
+1.停止从库: mysql> stop slave;
+2.看当前从库的状态。和前面的看主库状态一样。但现在是从从库复制，所以查看从库状态：mysql> show slave status;
+记下 Relay_Master_Log_file 和 Exec_Master_Log_Pos, 用处和前面一样.
+3.备份从库数据.用 mysqldump
+4.在新的从库上还原数据
+5.设置新从库的 slave 参数.change master to master_host = '192.168.3.119',master_port = 3306,master_user = 'repl_user',master_password='root',master_log_file='master-bin.000005',master_log_pos=194244;
+可以看到，虽然新从库是从从库复制的数据，但实际上 binlog 的 master 还是指向的主库。
+另外，这里将 master_log_file 和 master_log_pos 设置成第 2 步中的 Relay_Master_Log_file 和 Exec_Master_Log_Pos
+start slave;
+
+
+         
+mysql的主从复制+读写分离  
+
+
++--------+  						(write)		+--------+ 				  
+| client |				 +---------------------+| master |	
++--------+|		  		 |						+--------+|
+	      |		   		 |							|
+          |		         |							|
+          |        	+--------+  	(read)			|
+(read)    +--------+| amoeba |+---------------------|-----------+	
+(write)	  |  		+--------+|						|			|
+          |		  			  |						|			|
+	      |		   		(read)|						|			|	
++--------+|    				  |	+--------+			|			+--------+
+| client |					  +-| slave1 |+---------+----------+| slave2 |
++--------+          	        +--------+    	(replication)	+--------+
+
+
+读写分离
+
+Amoeba(变形虫)项目，专注 分布式数据库 proxy 开发。座落与Client、DB Server(s)之间。对客户端透明。具有负载均衡、高可用性、sql过滤、读写分离、可路由相关的query到目标数据库、可并发请求多台数据库合并结果。再看下上面的架构图。
+
+因为amoeba是java编写的，所以需要先安装java框架
+
+Amoeba
+：
+
+java安装
+
+下载java
+wget http://download.oracle.com/otn-pub/java/jdk/7u79-b15/jdk-7u79-linux-x64.tar.gz
+
+创建java目录，并解压
+mkdir -p /usr/jdk
+tar -xzvf jdk-7u79-linux-x64.tar.gz -C /usr/jdk
+
+配置环境变量，在/etc/profile文件最后添加如下配置
+vim /etc/profile
+
+export JAVA_HOME=/usr/jdk/
+export CLASSPATH=${JAVA_HOME}/lib
+export PATH=${JAVA_HOME}/bin:$PATH
+
+使配置文件生效
+source /etc/profile
+
+测试
+java -version
+java version "1.7.0_79"
+Java(TM) SE Runtime Environment (build 1.7.0_79-b15)
+Java HotSpot(TM) 64-Bit Server VM (build 24.79-b02, mixed mode)
+证明已经安装完成
+
+amoeba安装配置
+
+下载解压
+wget http://ufpr.dl.sourceforge.net/project/amoeba/Amoeba%20for%20mysql/3.x/amoeba-mysql-3.0.5-RC-distribution.zip
+unzip amoeba-mysql-3.0.5-RC-distribution.zip
+mv amoeba-mysql-3.0.5-RC /usr/local/
+
+配置
+vim amoeba-mysql-3.0.5-RC/conf/amoeba.xml （前段连接文件）
+
+<service name="Amoeba for Mysql" class="com.meidusa.amoeba.mysql.server.MySQLService">
+			<!-- port -->
+			<property name="port">8066</property>               ///////amoeba监听端口/////////
+			
+			<!-- bind ipAddress -->
+			<!-- 
+			<property name="ipAddress">127.0.0.1</property>     ///////amoeba监听地址/////////
+			 -->
+			
+			<property name="connectionFactory">
+				<bean class="com.meidusa.amoeba.mysql.net.MysqlClientConnectionFactory">
+					<property name="sendBufferSize">128</property>
+					<property name="receiveBufferSize">64</property>
+				</bean>
+			</property>
+			
+			<property name="authenticateProvider">
+				<bean class="com.meidusa.amoeba.mysql.server.MysqlClientAuthenticator">
+					
+					<property name="user">root</property>			///Amoeba代理用户名/////
+					
+					<property name="password">mysql</property>      ///Amoeba代理用户密码/////
+					
+					<property name="filter">
+						<bean class="com.meidusa.toolkit.net.authenticate.server.IPAccessController">
+							<property name="ipFile">${amoeba.home}/conf/access_list.conf</property>
+						</bean>
+					</property>
+				</bean>
+			</property>
+			
+		</service>
+.......................
+.......................
+	<queryRouter class="com.meidusa.amoeba.mysql.parser.MysqlQueryRouter">
+		<property name="ruleLoader">
+			<bean class="com.meidusa.amoeba.route.TableRuleFileLoader">
+				<property name="ruleFile">${amoeba.home}/conf/rule.xml</property>
+				<property name="functionFile">${amoeba.home}/conf/ruleFunctionMap.xml</property>
+			</bean>
+		</property>
+		<property name="sqlFunctionFile">${amoeba.home}/conf/functionMap.xml</property>
+		<property name="LRUMapSize">1500</property>
+		<property name="defaultPool">master</property>     ///////默认地址池////////
+		
+		<property name="writePool">master</property>       //////写地址池///////////
+		<property name="readPool">vipdb</property>		  //////读地址池////////
+		<property name="needParse">true</property>
+	</queryRouter>
+
+
+
+
+vim amoeba-mysql-3.0.5-RC/conf/dbServers.xml （后端数据库参数文件）
+
+<dbServer name="abstractServer" abstractive="true">
+		<factoryConfig class="com.meidusa.amoeba.mysql.net.MysqlServerConnectionFactory">
+			<property name="connectionManager">${defaultManager}</property>
+			<property name="sendBufferSize">64</property>
+			<property name="receiveBufferSize">128</property>
+				
+			<!-- mysql port -->
+			<property name="port">3306</property>   /////数据库连接端口///////
+			
+			<!-- mysql schema -->
+			<property name="schema">test</property>  ////默认数据库//// 
+			
+			<!-- mysql user -->
+			<property name="user">amoeba</property>   ///主从数据库默认连接用户////
+			
+			<property name="password">mysql</property>  ////主从数据库默认连接用户密码////
+		</factoryConfig>
+............................
+............................
+</dbServer>
+
+	<dbServer name="master"  parent="abstractServer">                            +---+
+		<factoryConfig>																 |				
+			<!-- mysql ip -->														 |	
+			<property name="ipAddress">172.17.0.4</property>						 |
+		</factoryConfig>															 |
+	</dbServer>																		 |
+																					 |		
+	<dbServer name="slave1"  parent="abstractServer">								 |
+		<factoryConfig>																 |
+			<!-- mysql ip -->														 |+-------//////定义后端数据库，dbServer可以随意命名，但自己必须清楚哪个是主，那个是从，而且主服务器命名要和amoeba.xml中writePool相对应，从服务器对应下面
+			<property name="ipAddress">172.17.0.5</property>						 |virturl dbServer中的poolNames ip对应各个db///////
+		</factoryConfig>														 	 |
+	</dbServer>																	     |
+	<dbServer name="slave2"  parent="abstractServer">								 |
+		<factoryConfig>																 |
+			<!-- mysql ip -->														 |
+			<property name="ipAddress">172.17.0.6</property>						 |
+		</factoryConfig>														 +---|
+	</dbServer>
+	<dbServer name="vipdb" virtual="true">										 +---+
+		<poolConfig class="com.meidusa.amoeba.server.MultipleServerPool">			 |
+			<!-- Load balancing strategy: 1=ROUNDROBIN , 2=WEIGHTBASED , 3=HA-->     |
+			<property name="loadbalance">1</property>                                |
+			                                                                         |+-------///第一行的dbserver name命名一定和amoeba.xml的readPool相对应，property name配置从服务器的集合，可以是一个，可以是多个！
+			<!-- Separated by commas,such as: server1,server2,server1 -->            |
+			<property name="poolNames">slave1,slave2</property>			 		 	 |
+		</poolConfig>																 |		
+	</dbServer>															         +---+
+
+vim amoeba-mysql-3.0.5-RC/jvm.properties （java虚拟机配置）
+
+把原来的这一句JVM_OPTIONS="-server -Xms256m -Xmx1024m -Xss196k -XX:PermSize=16m -XX:MaxPermSize=96m"
+改成JVM_OPTIONS="-server -Xms1024m -Xmx1024m -Xss256k -XX:PermSize=16m -XX:MaxPermSize=96m"
+
+在master，slave1，slave2分别授权dbServer.xml中定义的用户名和密码
+
+MariaDB [(none)]> grant all on *.* to 'amoeba'@'%' identified by "mysql";
+MariaDB [(none)]> grant all on *.* to 'amoeba'@'localhost' identified by "mysql";
+
+启动amoeba
+/usr/local/amoeba-mysql-3.0.5-RC/bin/launcher&
+
+查看进程(如果启动成功，会看到如下进程)
+ps -ef
+root       467   337  0 12:51 pts/0    00:00:00 /bin/bash amoeba-mysql-3.0.5-RC/bin/launcher
+root       472   467  0 12:51 pts/0    00:00:05 /usr/local/jdk1.7.0_67/bin/java -server -Xms1024m -Xmx1024m -Xss256k -XX:PermSize=16m
+root       473   467  0 12:51 pts/0    00:00:00 tail -f /usr/local/amoeba-mysql-3.0.5-RC/logs/console.log
+
+查看监听端口
+netstat -anpl
+tcp        0      0 :::8066                     :::*                        LISTEN      472/java                       
+tcp        0      0 ::ffff:172.17.0.8:8066      ::ffff:172.17.0.7:39978     ESTABLISHED 472/java            
+tcp        0      0 ::ffff:172.17.0.8:46624     ::ffff:172.17.0.5:3306      ESTABLISHED 472/java            
+tcp        0      0 ::ffff:172.17.0.8:41286     ::ffff:172.17.0.4:3306      ESTABLISHED 472/java 
+
+Test host测试
+测试是拿amoeba.xml中定义的用户名密码去测试，千万别被这地方绕进去
+
+[root@7898596a875b ~]# mysql -uroot -p -h172.17.0.8 -P8066
+Enter password: 
+Welcome to the MariaDB monitor.  Commands end with ; or \g.
+Your MySQL connection id is 1265630343
+Server version: 5.1.45-mysql-amoeba-proxy-3.0.4-BETA MariaDB Server
+
+Copyright (c) 2000, 2016, Oracle, MariaDB Corporation Ab and others.
+
+Type 'help;' or '\h' for help. Type '\c' to clear the current input statement.
+
+MySQL [(none)]> show databases;
++--------------------+
+| Database           |
++--------------------+
+| information_schema |
+| mysql              |
+| new1               |
+| new2               |
+| performance_schema |
+| test               |
++--------------------+
+6 rows in set (0.00 sec)
+
+测试读写分离
+master mysql
+:
+在master上建表
+MariaDB [(none)]> use new1;
+MariaDB [new1]> create table student( id int(4) not null AUTO_INCREMENT, name char(20) not null, age tinyint(2) NOT NULL default '0', dept varchar(16) default NULL, primary key(id), KEY index_name (name) );
+
+slave1,slave2
+:
+slave1
+停掉slave
+MariaDB [(none)]> stop slave;
+Query OK, 0 rows affected (0.02 sec)
+
+MariaDB [new1]> insert into new1.student(id,name) values(2,'slave');
+Query OK, 1 row affected (0.03 sec)
+
+MariaDB [new1]> select * from new1.student;
++----+-------+-----+------+
+| id | name  | age | dept |
++----+-------+-----+------+
+|  2 | slave |   0 | NULL |
++----+-------+-----+------+
+1 row in set (0.00 sec)
+
+
+slave2
+MariaDB [(none)]> stop slave;
+Query OK, 0 rows affected (0.02 sec)
+
+MariaDB [(none)]> insert into new1.student(id,name) values(3,'slave');
+Query OK, 1 row affected (0.04 sec)
+
+MariaDB [(none)]> select * from new1.student;
++----+-------+-----+------+
+| id | name  | age | dept |
++----+-------+-----+------+
+|  3 | slave |   0 | NULL |
++----+-------+-----+------+
+1 row in set (0.00 sec)
+
+
+master上也插入一条数据
+MariaDB [new1]> insert into new1.student(id,name) values(1,'slave');
+Query OK, 1 row affected (0.02 sec)
+
+查询插入
+MariaDB [new1]> select * from new1.student;
++----+-------+-----+------+
+| id | name  | age | dept |
++----+-------+-----+------+
+|  1 | slave |   0 | NULL |
++----+-------+-----+------+
+1 row in set (0.00 sec)
+
+Test host测试
+
+MySQL [new1]> select * from new1.student;
++----+-------+-----+------+
+| id | name  | age | dept |
++----+-------+-----+------+
+|  3 | slave |   0 | NULL |
++----+-------+-----+------+
+1 row in set (0.00 sec)
+
+第一次查询发现只查询到slave的数据，以为另一个slave读写分离没有做成功，再次查询发现
+amoeba是轮询着从从数据库池里读取数据
+
+MySQL [new1]> select * from new1.student;
++----+-------+-----+------+
+| id | name  | age | dept |
++----+-------+-----+------+
+|  2 | slave |   0 | NULL |
++----+-------+-----+------+
+1 row in set (0.00 sec)
+
+再插入一条数据，发现查询不到插入的，还是只能查询到slave上数据
+MySQL [new1]> insert into student(id,name) values(4,'yufyang');
+Query OK, 1 row affected (0.02 sec)
+
+MySQL [new1]> select * from new1.student;
++----+-------+-----+------+
+| id | name  | age | dept |
++----+-------+-----+------+
+|  3 | slave |   0 | NULL |
++----+-------+-----+------+
+1 row in set (0.00 sec)
+
+MySQL [new1]> select * from new1.student;
++----+-------+-----+------+
+| id | name  | age | dept |
++----+-------+-----+------+
+|  2 | slave |   0 | NULL |
++----+-------+-----+------+
+1 row in set (0.01 sec)
+
+master mysql
+：
+MariaDB [new1]> select * from new1.student;
++----+---------+-----+------+
+| id | name    | age | dept |
++----+---------+-----+------+
+|  1 | slave   |   0 | NULL |
+|  4 | yufyang |   0 | NULL |
++----+---------+-----+------+
+2 rows in set (0.00 sec)
+发现刚才在测试机上通过amoeba插入的数据已经出现在主数据库的表中
+
+开启slave
+再次查询slave上的数据
+MariaDB [new1]> select * from new1.student;
++----+---------+-----+------+
+| id | name    | age | dept |
++----+---------+-----+------+
+|  1 | slave   |   0 | NULL |
+|  2 | slave   |   0 | NULL |
+|  4 | yufyang |   0 | NULL |
++----+---------+-----+------+
+发现已经同步master，amoeba测试机上的数据了
