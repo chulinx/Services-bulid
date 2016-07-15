@@ -1,0 +1,259 @@
+ubuntu 16.04利用docker搭建java+tomcat+nginx反向代理
+
+新建两个docker容器
+docker run -it --name Tomcat-mysql -v /mnt:/mnt -p 8866:80 -p 33006:3306 ubuntu /bin/bash
+docker run -itd --name webserver -p 8888:80 -v /mnt/:/mnt/ ubuntu /bin/bash
+
+root@TestServer:~# docker ps -a
+CONTAINER ID        IMAGE               COMMAND             CREATED             STATUS              PORTS                                           NAMES
+82756bbf1a00        ubuntu              "/bin/bash"         53 minutes ago      Up 53 minutes       0.0.0.0:80->80/tcp                              webserver
+38530da66ec0        ubuntu              "/bin/bash"         23 hours ago        Up 23 hours         0.0.0.0:8866->80/tcp, 0.0.0.0:33006->3306/tcp   Tomcat-mysql
+
+Java+tomcat+mysql ip:172.17.0.2
+
+
+进入第一个容器开始配置java+tomcat+mysql ip:172.17.0.2 ：
+docker attach Tomcat-mysql
+
+java搭建安装：
+
+下载java
+wget http://download.oracle.com/otn-pub/java/jdk/7u79-b15/jdk-7u79-linux-x64.tar.gz
+
+创建java目录，并解压
+mkdir -p /usr/jdk
+tar -xzvf jdk-7u79-linux-x64.tar.gz -C /usr/jdk
+
+配置环境变量，在/etc/profile文件最后添加如下配置
+vim /etc/profile
+
+export JAVA_HOME=/usr/jdk/
+export CLASSPATH=${JAVA_HOME}/lib
+export PATH=${JAVA_HOME}/bin:$PATH
+
+使配置文件生效
+source /etc/profile
+
+测试
+java -version
+java version "1.7.0_79"
+Java(TM) SE Runtime Environment (build 1.7.0_79-b15)
+Java HotSpot(TM) 64-Bit Server VM (build 24.79-b02, mixed mode)
+证明已经安装完成
+
+tomcat安装：
+
+下载：
+wget http://apache.fayea.com/tomcat/tomcat-7/v7.0.70/bin/apache-tomcat-7.0.70.tar.gz
+
+创建安装目录并解压
+mkdir -p /usr/tomcat
+tar -xzvf apache-tomcat-7.0.70.tar.gz -C /usr/tomcat
+
+配置tomcat启动脚本，在catalina.sh增加两行
+vim /usr/tomcat/catalina.sh
+
+CATALINA_HOME=/usr/tomcat
+JAVA_HOME=/usr/jdk
+
+通过service管理tomcat服务开启关闭
+cp /usr/tomcat/bin/catalina.sh /etc/init.d/tomcat
+chkconfig --add tomcat
+chkconfig tomcat on
+
+新建网站程序目录
+
+mkdir -p /usr/www/www.gongmingdai.com
+tar -xzvf /mnt/soft/gongmingdai.tar.gz -C /usr/www/www.gongmingdai.com
+
+配置tomcat
+vim /usr/tomcat/conf/server.xml 
+
+配置tomcat主机支持utf-8
+<Connector port="8080" protocol="HTTP/1.1"
+               connectionTimeout="20000"
+               redirectPort="8443" URIEncoding="UTF-8" />
+
+配置程序路径
+ <Host name="localhost"  appBase="/usr/www/www.gongmingdai.com/"
+            unpackWARs="true" autoDeploy="true">
+            <Context path="" docBase="/usr/www/www.gongmingdai.com/" reloadable="ture"/>
+
+配置catalina.properties，跳过tomcat启动时扫描jar包
+tomcat.util.scan.DefaultJarScanner.jarsToSkip=\改为tomcat.util.scan.DefaultJarScanner.jarsToSkip=*.jar
+
+
+mysql安装配置：
+ sudo apt-get install mysql-server
+设置mysql的root密码
+mysqladmin -uroot password “YOU PASSWORD”
+
+创建网站程序数据库
+
+mysql -uroot -pmysql -e "CREATE DATABASE gmdai DEFAULT CHARACTER SET utf8 COLLATE utf8_general_ci;"
+
+创建数据库用户并授权
+mysql -uroot -pmysql -e "grant all privileges on gmdai.* to wdbgmdai@localhost identified by 'j76XvmA1HDfkqr2J';"
+mysql -uroot -pmysql -e "grant all privileges on gmdai.* to wdbgmdai@127.0.0.1 identified by 'j76XvmA1HDfkqr2J';"
+
+拷贝网站程序数据库，解压并导入
+tar -xzvf chzwwwgmdai_2016_07_07_00.sql.tar.gz
+mysql -uwdbgmdai -pj76XvmA1HDfkqr2J gmdai < chzwwwgmdai_2016_07_07_00.sql
+
+apt-get install links
+测试tomcat搭建成功性
+links 127.0.0.1：8080
+
+Nginx ip:172.17.0.3
+进入第二个容器，搭建nginx反向代理
+docker attach webserver ip:172.17.0.3
+
+编译安装nginx
+
+安装编译需要的基础软件
+sudo apt-get install libpcre3 libpcre3-dev zlib1g-dev libssl-dev build-essential vim wget
+
+下载openssl
+wget http://www.openssl.org/source/openssl-1.0.2a.tar.gz
+
+解压编译安装
+tar -xzvf openssl-1.0.2a.tar.gz -C /usr/local/src/
+cd /usr/local/src/openssl-1.0.2a/
+./config
+make && sudo make install
+
+下载nginx
+wget  http://nginx.org/download/nginx-1.8.0.tar.gz
+
+解压编译安装
+tar -xzvf nginx-1.8.0.tar.gz -C /usr/local/src
+cd /usr/local/src/nginx-1.8.0
+sudo ./configure --prefix=/usr/local/nginx --with-openssl=/usr/include/openssl
+sudo make && sudo make install
+
+
+配置nginx.conf,配置反向代理
+
+user  root ;
+worker_processes  auto;
+
+events {
+    worker_connections  1024;
+}
+
+http {
+    include       mime.types;
+    default_type  application/octet-stream;
+    charset  utf-8;
+    server_names_hash_bucket_size 128;
+    client_header_buffer_size 4k;
+    large_client_header_buffers 4 1m;
+    client_max_body_size 8m;
+
+    open_file_cache max=1024 inactive=20s;
+    open_file_cache_valid 30s;
+    open_file_cache_min_uses 1;
+    sendfile        on;
+    tcp_nopush     on;
+
+    keepalive_timeout  65;
+    tcp_nodelay on;
+    server_tokens off;
+    port_in_redirect off;
+    fastcgi_connect_timeout     300;
+    fastcgi_send_timeout 300;
+    fastcgi_read_timeout 300;
+    fastcgi_buffer_size 64k;
+    fastcgi_buffers     4 64k;
+    fastcgi_busy_buffers_size 128k;
+    fastcgi_temp_file_write_size 128k;
+    gzip  on;
+    gzip_vary on;
+    gzip_min_length     1k;
+    gzip_buffers 4 16k;
+    gzip_http_version 1.0;
+    gzip_comp_level     2;
+    gzip_types  text/plain      application/x-javascript text/css application/xml;
+    gzip_disable "MSIE [1-6]\.(?!.*SV1)";
+
+    #Proxy
+    proxy_connect_timeout       300;
+    proxy_read_timeout  300;
+    proxy_send_timeout  300;
+    proxy_buffer_size   128k;
+    proxy_buffers       100     128k;
+    proxy_busy_buffers_size     128k;
+    proxy_temp_file_write_size  128k;
+    #Limit
+    limit_req_zone $binary_remote_addr  zone=xxx:10m rate=5r/s;
+
+    log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                     '$status $body_bytes_sent "$http_referer" '
+                     '"$http_user_agent" "$http_x_forwarded_for"';
+
+    ###做负载均衡时用到，反向代理和动静分离暂时用不到，先注销掉#####
+    #upstream Tomcat{
+    #   ip_hash;
+    #   server localhost:8842;
+    #   server localhost:8843;
+    #}
+    ######动静分离原理：两个虚拟主机，一个是端口8080，nginx处理静态网页的，一个是端口为80反向代理tomcat的，######
+    server {
+
+       listen       8080;
+
+       server_name  localhost;
+
+       index index.jsp;
+
+       location / {
+
+       		root /htdoc/www/www.gmdai.com;
+
+        	index index.html;
+
+        }
+
+        }
+    server {
+        listen       80;
+        server_name  172.17.0.3;
+        index  index.jsp index.html index.htm;
+        error_log   logs/error.log crit;
+        access_log  logs/access.log  main;
+        rewrite ^(.*)\;(.*)$ $1 last;
+
+        location ~ \.(jsp|do|htm|page|html|action)$ {
+            proxy_pass http://172.17.0.2:8080;
+            proxy_redirect off;
+            proxy_set_header HOST $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        }
+        location  ~* \.(css|js)$ {
+                proxy_pass http://172.17.0.3:8080;
+                expires    10d;
+                }
+
+
+        location ~* \.(html|gif|jpg|jpeg|png|bmp|swf|ico|flv|mp3|wav|wmv)$  {
+                proxy_pass http://172.17.0.3:8080;
+                expires      15d;
+                access_log   off;
+        }
+
+                error_page  404  /404.html;
+
+                error_page   500 502 503 504  /50x.html;
+                location = /50x.html {
+            root   html;
+        }
+
+        error_page   500 502 503 504  /50x.html;
+        location ~* \.(htacess|tar.gz|tar|zip|sql)$ {
+
+                return http://172.17.0.3:8080;
+
+        }
+    }
+
