@@ -1,0 +1,80 @@
+tomcat下使用cronolog对catalina.out日志文件分割
+
+
+ 
+tomcat 的catalina.out文件的不断扩大，导致系统磁盘空间边变小，而且管理也难于管理，所以想用一种工具来分割它。网上找了找用cronolog
+安装过程如下：
+1、下载（最新版本） 
+    #  wget http://cronolog.org/download/cronolog-1.6.2.tar.gz 
+2、解压缩 
+    # tar zxvf cronolog-1.6.2.tar.gz 
+3、进入cronolog安装文件所在目录 
+    # cd cronolog-1.6.2 
+4、运行安装 
+    # ./configure 
+    # make 
+    # make install 
+5、查看cronolog安装后所在目录（验证安装是否成功） 
+    # which cronolog 
+一般情况下显示为：/usr/local/sbin/cronolog 
+
+要想分割tomcat的catalina.out，需作如下工作： 
+修改tomcat bin目录下的catalina.sh文件中的
+org.apache.catalina.startup.Bootstrap “$@” start \
+>> “$CATALINA_BASE”/logs/catalina.out 2>&1 &
+替换为
+org.apache.catalina.startup.Bootstrap "$@" start \
+|/usr/local/sbin/cronolog "$CATALINA_BASE"/logs/catalina.%Y-%m-%d.out >> /dev/null 2>&1 &
+ 
+同时，文件中有一行
+touch “$CATALINA_BASE”/logs/catalina.out
+可以注释掉，完成之后重起Tomcat就可以了， 
+看logs文件中是否有catalina.2009-07-01.out样式的日志。
+在Windows下安装cronolog
+在Windows下很简单，解压后直接把cronolog.exe复制到apache目录下的bin目录中.
+ 
+=======================================================
+网络上找了一下，针对在 Linux 环境下执行 Tomcat 的部份，发现有个不错的工具软件 cronolog 可以协助 Web Server 之类的做 log  檔的 rotate ，详细的运作原理可能大家得自己去这个网站上查，我的认知大致如下：  
+Tomcat 先把输出写到 console( 标准输出 )  然后透过 pipe (|)  转为 cronolog  的输入，由 cronolog 针对一个事先给定的文件名的命名规则，去过滤数据，定期关闭旧文件，然后再开启新档。如果我们将文件名的命名规则设为 catalina.out.%Y-%m-%d ，就可以做到每天开一个新的 catalina.out.yyyy-mm-dd 的档案了。  
+ 
+以下是简单的过程说明：  
+1. 安装 cronolog 
+2. 修改 catalina.sh 
+3. 重新启动 Tomcat 
+ 
+1  安装 cronolog 
+wget http://cronolog.org/download/cronolog-1.6.2.tar.gz
+tar zxvf cronolog-1.6.2.tar.gz
+cd cronolog-1.6.2
+./configure
+make
+make install
+ 
+用 which cronolog 可以查到安装的路径，默认应该是 /usr/local/sbin/cronolog ，这个路径待会在修改 catalina.sh 时会用到。  
+2  修改 catalina.sh 
+以 Tomcat 6.0.24 的版本为例  
+2.1  第一步
+将
+if [ -z "$CATALINA_OUT" ] ; then
+   CATALINA_OUT="$CATALINA_BASE"/logs/catalina.out
+fi
+修改为  
+if [ -z "$CATALINA_OUT" ] ; then
+   CATALINA_OUT="$CATALINA_BASE"/logs/catalina.out.%Y-%m-%d
+fi
+2.2  第二步
+将  
+touch "$CATALINA_OUT"
+改为  
+#touch "$CATALINA_OUT"
+2.3  第三步
+将
+org.apache.catalina.startup.Bootstrap "$@" start \
+>> "$CATALINA_OUT"   2>&1 &
+修改为  
+org.apache.catalina.startup.Bootstrap "$@" start 2>&1 \
+| /usr/local/sbin/cronolog "$CATALINA_OUT" >> /dev/null &
+2.4  重新启动 Tomcat 
+service tomcat restart
+可以在 Tomcat 的 logs 目录底下找到以系统日期为结尾的 catalina.out.yyyy-mm-dd 的档案，这样子就成功了。  
+后续就是持续观察看看是不是每天都有产生一个新的 catalina.out.yyyy-mm-dd 档案。然后再安排定期删除这些较旧的 log 檔即可。
